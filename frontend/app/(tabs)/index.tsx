@@ -3,8 +3,8 @@ import { ActivityIndicator, FlatList, SafeAreaView, ScrollView, StyleSheet, Text
 import { Image } from 'expo-image';
 import * as Notifications from 'expo-notifications';
 
-const MONKEY_API = 'http://localhost:8080';
-const IMAGE_API = 'http://localhost:8081';
+const MONKEY_API = 'http://localhost:8000/status.json';
+const IMAGE_API = 'http://localhost:8000/latest.jpg';
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -69,19 +69,7 @@ export default function MonkeyDetectionScreen() {
 
   const fetchMonkeyImages = useCallback(async () => {
     if (!isMonkey) return;
-
-    try {
-      setLoading(true);
-      const response = await fetch(`${IMAGE_API}/monkeys`);
-      if (!response.ok) return;
-
-      const data: MonkeyImage[] = await response.json();
-      setImages(data);
-    } catch (error) {
-      console.error('Failed to fetch monkey images:', error);
-    } finally {
-      setLoading(false);
-    }
+    setImages([{ id: 'latest', url: `${IMAGE_API}?t=${Date.now()}` }]);
   }, [isMonkey]);
 
   useEffect(() => {

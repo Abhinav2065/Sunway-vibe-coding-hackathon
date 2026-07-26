@@ -7,6 +7,9 @@ import sys
 import socket
 import base64
 import re
+from dotenv import load_dotenv
+
+load_dotenv()
 
 PORT = 8000
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
@@ -110,6 +113,17 @@ class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             target_url = "https://api.groq.com/openai/v1/chat/completions"
             groq_api_key = os.environ.get("GROQ_API_KEY", "YOUR_GROQ_API_KEY_HERE")
             
+            if not groq_api_key or groq_api_key == "YOUR_GROQ_API_KEY_HERE":
+                err_json = json.dumps({
+                    "error": "Missing GROQ_API_KEY. Set it as an environment variable."
+                }).encode('utf-8')
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(err_json)
+                return
+            
             req = urllib.request.Request(
                 target_url,
                 data=forward_data,
@@ -122,7 +136,7 @@ class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
 
             try:
-                with urllib.request.urlopen(req) as response:
+                with urllib.request.urlopen(req, timeout=60) as response:
                     res_body = response.read()
                     
                     # Update status.json based on model response
@@ -153,13 +167,24 @@ class ProxyAndStaticHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
                     self.wfile.write(res_body)
             except urllib.error.HTTPError as e:
                 err_body = e.read()
+                print(f"Groq API HTTPError {e.code}:", err_body.decode('utf-8', errors='replace')[:500])
                 self.send_response(e.code)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
                 self.end_headers()
                 self.wfile.write(err_body)
+            except urllib.error.URLError as e:
+                err_json = json.dumps({"error": f"Groq connection error: {str(e.reason)}"}).encode('utf-8')
+                print("Groq URLError:", e.reason)
+                self.send_response(500)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Access-Control-Allow-Origin', '*')
+                self.end_headers()
+                self.wfile.write(err_json)
             except Exception as e:
-                err_json = json.dumps({"error": str(e)}).encode('utf-8')
+                import traceback
+                traceback.print_exc()
+                err_json = json.dumps({"error": f"Server error: {str(e)}"}).encode('utf-8')
                 self.send_response(500)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')

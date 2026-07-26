@@ -210,7 +210,15 @@ export default function App() {
       });
 
       if (!response.ok) {
-        throw new Error(`Server returned status ${response.status}`);
+        const text = await response.text();
+        let errorDetail = text;
+        try {
+          const errJson = JSON.parse(text);
+          errorDetail = errJson.error?.message || errJson.error || JSON.stringify(errJson);
+        } catch {
+          // keep raw text
+        }
+        throw new Error(`Server returned status ${response.status}: ${errorDetail}`);
       }
 
       const data = await response.json();
