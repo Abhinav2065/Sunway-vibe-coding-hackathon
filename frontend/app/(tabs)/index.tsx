@@ -26,9 +26,9 @@ type MonkeyImage = {
 export default function MonkeyDetectionScreen() {
   const [isMonkey, setIsMonkey] = useState(false);
   const [images, setImages] = useState<MonkeyImage[]>([]);
-  const [loading, setLoading] = useState(false);
   const [notificationEnabled, setNotificationEnabled] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
+  const [latestImageUrl, setLatestImageUrl] = useState<string | null>(null);
 
   const requestNotificationPermission = useCallback(async () => {
     const { status } = await Notifications.requestPermissionsAsync();
@@ -48,7 +48,7 @@ export default function MonkeyDetectionScreen() {
 
   const fetchMonkeyStatus = useCallback(async () => {
     try {
-      const response = await fetch(`${MONKEY_API}/`);
+      const response = await fetch(`${MONKEY_API}`);
       if (!response.ok) return;
 
       const data: MonkeyStatus = await response.json();
@@ -57,7 +57,7 @@ export default function MonkeyDetectionScreen() {
       setIsMonkey(monkeyDetected);
 
       if (monkeyDetected) {
-        await fetchMonkeyImages();
+        setImages([{ id: 'latest', url: `${IMAGE_API}?t=${Date.now()}` }]);
         if (notificationEnabled) {
           await sendMonkeyNotification();
         }
@@ -67,17 +67,24 @@ export default function MonkeyDetectionScreen() {
     }
   }, [notificationEnabled, sendMonkeyNotification]);
 
-  const fetchMonkeyImages = useCallback(async () => {
-    if (!isMonkey) return;
-    setImages([{ id: 'latest', url: `${IMAGE_API}?t=${Date.now()}` }]);
-  }, [isMonkey]);
+  const fetchLatestImage = useCallback(async () => {
+    try {
+      setLatestImageUrl(`${IMAGE_API}?t=${Date.now()}`);
+    } catch (error) {
+      console.error('Failed to fetch latest image:', error);
+    }
+  }, []);
 
   useEffect(() => {
     requestNotificationPermission();
     fetchMonkeyStatus();
-    const interval = setInterval(fetchMonkeyStatus, 5000);
+    fetchLatestImage();
+    const interval = setInterval(() => {
+      fetchMonkeyStatus();
+      fetchLatestImage();
+    }, 5000);
     return () => clearInterval(interval);
-  }, [requestNotificationPermission, fetchMonkeyStatus]);
+  }, [requestNotificationPermission, fetchMonkeyStatus, fetchLatestImage]);
 
   const renderMonkeyImage = ({ item }: { item: MonkeyImage }) => (
     <Image
@@ -107,24 +114,34 @@ export default function MonkeyDetectionScreen() {
           </View>
         )}
 
+        <View style={styles.latestImageContainer}>
+          <Text style={styles.latestImageHeader}>Latest Snapshot</Text>
+          {latestImageUrl ? (
+            <Image
+              source={{ uri: latestImageUrl }}
+              style={styles.latestImage}
+              contentFit="contain"
+              transition={200}
+            />
+          ) : (
+            <ActivityIndicator size="small" color="#007AFF" style={styles.latestImageLoader} />
+          )}
+        </View>
+
         {isMonkey && (
           <View style={styles.imagesContainer}>
             <Text style={styles.imagesHeader}>Detected Images</Text>
-            {loading ? (
-              <ActivityIndicator size="large" color="#007AFF" style={styles.loader} />
-            ) : (
-              <FlatList
-                data={images}
-                renderItem={renderMonkeyImage}
-                keyExtractor={(item) => item.id}
-                numColumns={2}
-                scrollEnabled={false}
-                columnWrapperStyle={styles.row}
-                ListEmptyComponent={
-                  <Text style={styles.emptyText}>No monkey images available</Text>
-                }
-              />
-            )}
+            <FlatList
+              data={images}
+              renderItem={renderMonkeyImage}
+              keyExtractor={(item) => item.id}
+              numColumns={2}
+              scrollEnabled={false}
+              columnWrapperStyle={styles.row}
+              ListEmptyComponent={
+                <Text style={styles.emptyText}>No monkey images available</Text>
+              }
+            />
           </View>
         )}
       </ScrollView>
@@ -189,6 +206,26 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: '#8E8E93',
   },
+  latestImageContainer: {
+    width: '100%',
+    marginTop: 16,
+    alignItems: 'center',
+  },
+  latestImageHeader: {
+    fontSize: 20,
+    fontWeight: '600',
+    marginBottom: 12,
+    color: '#1c1c1e',
+  },
+  latestImage: {
+    width: '100%',
+    height: 250,
+    borderRadius: 12,
+    backgroundColor: '#e5e5e5',
+  },
+  latestImageLoader: {
+    marginVertical: 20,
+  },
   imagesContainer: {
     width: '100%',
     marginTop: 16,
@@ -208,9 +245,6 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     marginBottom: 12,
     backgroundColor: '#e5e5e5',
-  },
-  loader: {
-    marginVertical: 20,
   },
   emptyText: {
     textAlign: 'center',
