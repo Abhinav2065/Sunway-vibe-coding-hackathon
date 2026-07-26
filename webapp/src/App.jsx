@@ -1,0 +1,475 @@
+import React, { useState, useEffect, useRef } from 'react';
+
+export default function App() {
+  // Motion & Webcam states
+  const [isWebcamActive, setIsWebcamActive] = useState(false);
+  const [webcamError, setWebcamError] = useState(null);
+  const [motionScore, setMotionScore] = useState(0);
+  const [threshold, setThreshold] = useState(5.0); // % motion threshold
+  const [statusMessage, setStatusMessage] = useState('Webcam inactive. Click "Start Webcam" to begin.');
+  const [countdown, setCountdown] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  // AI & Detection states
+  const [monkeyAlert, setMonkeyAlert] = useState(false);
+  const [lastDetectionResult, setLastDetectionResult] = useState(null);
+  const [logs, setLogs] = useState([]);
+
+  // DOM Refs
+  const videoRef = useRef(null);
+  const motionCanvasRef = useRef(null);
+  const snapshotCanvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const prevPixelsRef = useRef(null);
+  const isProcessingRef = useRef(false);
+  const thresholdRef = useRef(threshold);
+
+  // Sync threshold ref for loop
+  useEffect(() => {
+    thresholdRef.current = threshold;
+  }, [threshold]);
+
+  // Start webcam
+  const startWebcam = async () => {
+    setWebcamError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: { ideal: 640 }, height: { ideal: 480 } },
+        audio: false
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+      setIsWebcamActive(true);
+      setStatusMessage('Webcam active. Monitoring for motion...');
+    } catch (err) {
+      console.error('Error accessing webcam:', err);
+      setWebcamError(err.message || 'Could not access webcam. Please allow camera permissions.');
+      setStatusMessage('Failed to start webcam.');
+    }
+  };
+
+  // Stop webcam
+  const stopWebcam = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsWebcamActive(false);
+    setStatusMessage('Webcam stopped.');
+    setMotionScore(0);
+    prevPixelsRef.current = null;
+  };
+
+  // Motion Detection Loop (running ~10 FPS)
+  useEffect(() => {
+    let intervalId = null;
+
+    if (isWebcamActive) {
+      intervalId = setInterval(() => {
+        const video = videoRef.current;
+        const canvas = motionCanvasRef.current;
+
+        if (!video || !canvas || video.readyState !== 4) return;
+
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+        const width = canvas.width;
+        const height = canvas.height;
+
+        // Draw downscaled frame for performance
+        ctx.drawImage(video, 0, 0, width, height);
+        const currentImageData = ctx.getImageData(0, 0, width, height);
+        const currData = currentImageData.data;
+
+        if (prevPixelsRef.current) {
+          const prevData = prevPixelsRef.current;
+          let changedPixels = 0;
+          const totalPixels = currData.length / 4;
+
+          for (let i = 0; i < currData.length; i += 4) {
+            const currLum = 0.299 * currData[i] + 0.587 * currData[i + 1] + 0.114 * currData[i + 2];
+            const prevLum = 0.299 * prevData[i] + 0.587 * prevData[i + 1] + 0.114 * prevData[i + 2];
+            
+            // Pixel noise threshold of 30
+            if (Math.abs(currLum - prevLum) > 30) {
+              changedPixels++;
+            }
+          }
+
+          const diffPercent = (changedPixels / totalPixels) * 100;
+          setMotionScore(parseFloat(diffPercent.toFixed(1)));
+
+          // Check motion trigger
+          if (diffPercent >= thresholdRef.current && !isProcessingRef.current) {
+            triggerMotionSequence();
+          }
+        }
+
+        prevPixelsRef.current = currData;
+      }, 100);
+    }
+
+    return () => {
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [isWebcamActive]);
+
+  // Trigger sequence: Wait 5 seconds countdown delay, then capture and send to API
+  const triggerMotionSequence = () => {
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+
+    let secondsLeft = 5;
+    setStatusMessage(`MOTION DETECTED! Waiting ${secondsLeft} seconds delay before snapshot...`);
+    setCountdown(secondsLeft);
+
+    const timerId = setInterval(() => {
+      secondsLeft -= 1;
+      if (secondsLeft > 0) {
+        setCountdown(secondsLeft);
+        setStatusMessage(`MOTION DETECTED! Waiting ${secondsLeft} seconds delay before snapshot...`);
+      } else {
+        clearInterval(timerId);
+        setCountdown(null);
+        captureAndAnalyze();
+      }
+    }, 1000);
+  };
+
+  // Manual Trigger
+  const forceManualTrigger = () => {
+    if (!isWebcamActive) {
+      alert('Please start the webcam first!');
+      return;
+    }
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
+    setIsProcessing(true);
+    setStatusMessage('Manual trigger: Capturing immediately...');
+    captureAndAnalyze();
+  };
+
+  // Capture snapshot and query Groq API via local backend server
+  const captureAndAnalyze = async () => {
+    const video = videoRef.current;
+    const canvas = snapshotCanvasRef.current;
+
+    if (!video || !canvas) {
+      resetCooldown('Error: Video element not ready.');
+      return;
+    }
+
+    setStatusMessage('Capturing snapshot...');
+    const ctx = canvas.getContext('2d');
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    // Get Base64 image data URL
+    const imageBase64 = canvas.toDataURL('image/jpeg', 0.85);
+
+    setStatusMessage('Sending snapshot to Groq API (qwen/qwen3.6-27b)...');
+    const timestamp = new Date().toLocaleTimeString();
+
+    const promptText = "These images are taken from a phone screen so the image quality might be bad, but if it has a monkey then answer strictly with 'YES', otherwise answer strictly with 'NO'.";
+
+    let apiEndpoint = 'http://localhost:8000/api/chat';
+
+    try {
+      const response = await fetch(apiEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'qwen/qwen3.6-27b',
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: promptText
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: imageBase64
+                  }
+                }
+              ]
+            }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+
+      if (data.error) {
+        throw new Error(`Groq API Error: ${data.error.message || JSON.stringify(data.error)}`);
+      }
+
+      const answerRaw = data?.choices?.[0]?.message?.content || '';
+      
+      // Remove any <think>...</think> reasoning blocks from Qwen model output
+      const cleanOutput = answerRaw.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+
+      // Check strictly if the final answer starts with YES or is YES
+      const isMonkey = /^YES\b/i.test(cleanOutput) || cleanOutput.toUpperCase() === 'YES';
+
+      if (isMonkey) {
+        setMonkeyAlert(true);
+        setLastDetectionResult({ isMonkey: true, raw: answerRaw, clean: cleanOutput, time: timestamp });
+        setStatusMessage(`ALERT: Monkey detected at ${timestamp}!`);
+      } else {
+        setLastDetectionResult({ isMonkey: false, raw: answerRaw, clean: cleanOutput, time: timestamp });
+        setStatusMessage(`Analysis finished at ${timestamp}: No monkey detected.`);
+      }
+
+      // Append log entry
+      setLogs(prev => [
+        {
+          id: Date.now(),
+          time: timestamp,
+          image: imageBase64,
+          rawResponse: answerRaw,
+          cleanResponse: cleanOutput,
+          isMonkey: isMonkey
+        },
+        ...prev
+      ]);
+
+    } catch (err) {
+      console.error('API Error:', err);
+      const friendlyError = err.message.includes('fetch') 
+        ? "Could not connect to backend server. Please run 'python server.py' or double-click 'start.bat'!"
+        : err.message;
+        
+      setStatusMessage(`API Error: ${friendlyError}`);
+      setLogs(prev => [
+        {
+          id: Date.now(),
+          time: timestamp,
+          image: imageBase64,
+          rawResponse: `Error: ${friendlyError}`,
+          cleanResponse: `Error: ${friendlyError}`,
+          isMonkey: false
+        },
+        ...prev
+      ]);
+    } finally {
+      // Cooldown 5s before resuming motion detection
+      setTimeout(() => {
+        resetCooldown('Resuming motion monitoring...');
+      }, 5000);
+    }
+  };
+
+  const resetCooldown = (msg) => {
+    isProcessingRef.current = false;
+    setIsProcessing(false);
+    setStatusMessage(msg || 'Webcam active. Monitoring for motion...');
+  };
+
+  const dismissAlert = () => {
+    setMonkeyAlert(false);
+  };
+
+  return (
+    <div style={{ fontFamily: 'sans-serif', padding: '20px', maxWidth: '900px', margin: '0 auto', color: '#000', backgroundColor: '#fff' }}>
+      <h1>AI Monkey Detector (Motion-Activated)</h1>
+      <p>Uses webcam motion detection, 5-second trigger delay, and Groq Vision API (<strong>qwen/qwen3.6-27b</strong>).</p>
+
+      {/* NOTIFICATION BANNER */}
+      {monkeyAlert && (
+        <div style={{
+          backgroundColor: '#ff0000',
+          color: '#ffffff',
+          padding: '15px 20px',
+          fontWeight: 'bold',
+          fontSize: '22px',
+          border: '3px solid #880000',
+          marginBottom: '20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+          <span>ALERT: Monkey detected!</span>
+          <button 
+            onClick={dismissAlert} 
+            style={{ marginLeft: 'auto', padding: '5px 15px', fontWeight: 'bold', cursor: 'pointer' }}
+          >
+            Dismiss Alert
+          </button>
+        </div>
+      )}
+
+      {/* WEBCAM ERROR DISPLAY */}
+      {webcamError && (
+        <div style={{ border: '2px solid red', padding: '10px', color: 'red', marginBottom: '15px' }}>
+          <strong>Error:</strong> {webcamError}
+        </div>
+      )}
+
+      {/* CONTROLS SECTION */}
+      <fieldset style={{ marginBottom: '20px', padding: '15px' }}>
+        <legend><strong>Webcam & Detection Controls</strong></legend>
+        <div style={{ marginBottom: '10px' }}>
+          {!isWebcamActive ? (
+            <button onClick={startWebcam} style={{ padding: '8px 16px', fontSize: '14px', marginRight: '10px', cursor: 'pointer' }}>
+              Start Webcam
+            </button>
+          ) : (
+            <button onClick={stopWebcam} style={{ padding: '8px 16px', fontSize: '14px', marginRight: '10px', cursor: 'pointer' }}>
+              Stop Webcam
+            </button>
+          )}
+
+          <button 
+            onClick={forceManualTrigger} 
+            disabled={!isWebcamActive || isProcessing}
+            style={{ padding: '8px 16px', fontSize: '14px', cursor: isWebcamActive && !isProcessing ? 'pointer' : 'not-allowed' }}
+          >
+            Force Snapshot & Check AI
+          </button>
+        </div>
+
+        <div style={{ marginTop: '15px' }}>
+          <label htmlFor="sensitivitySlider">
+            <strong>Motion Sensitivity Threshold: {threshold}%</strong>
+          </label>
+          <br />
+          <input
+            id="sensitivitySlider"
+            type="range"
+            min="1.0"
+            max="25.0"
+            step="0.5"
+            value={threshold}
+            onChange={(e) => setThreshold(parseFloat(e.target.value))}
+            style={{ width: '300px', marginTop: '5px' }}
+          />
+          <span style={{ marginLeft: '10px', fontSize: '12px' }}>
+            (Lower = more sensitive, Higher = requires bigger movement)
+          </span>
+        </div>
+      </fieldset>
+
+      {/* STATUS & MONITORING SECTION */}
+      <fieldset style={{ marginBottom: '20px', padding: '15px' }}>
+        <legend><strong>Live Monitoring & Motion Meter</strong></legend>
+
+        <div style={{ marginBottom: '10px' }}>
+          <strong>System Status:</strong> {statusMessage}
+        </div>
+
+        {countdown !== null && (
+          <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#d9534f', marginBottom: '10px' }}>
+            ⏳ Countdown Delay: {countdown}s remaining before snapshot...
+          </div>
+        )}
+
+        <div style={{ marginBottom: '15px' }}>
+          <strong>Current Motion Level: {motionScore}%</strong>
+          <div style={{ width: '100%', height: '20px', backgroundColor: '#e0e0e0', border: '1px solid #999', marginTop: '5px' }}>
+            <div
+              style={{
+                width: `${Math.min(motionScore * 4, 100)}%`,
+                height: '100%',
+                backgroundColor: motionScore >= threshold ? 'red' : 'green',
+                transition: 'width 0.1s linear'
+              }}
+            />
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: '20px', flexWrap: 'wrap' }}>
+          <div>
+            <h4>Live Webcam Feed</h4>
+            <video
+              ref={videoRef}
+              muted
+              playsInline
+              style={{ width: '320px', height: '240px', backgroundColor: '#000', border: '1px solid #333' }}
+            />
+          </div>
+
+          <div>
+            <h4>Downscaled Motion Sampler (160x120)</h4>
+            <canvas
+              ref={motionCanvasRef}
+              width="160"
+              height="120"
+              style={{ width: '160px', height: '120px', border: '1px solid #666', backgroundColor: '#ccc' }}
+            />
+          </div>
+        </div>
+
+        {/* Hidden full canvas for snapshot processing */}
+        <canvas ref={snapshotCanvasRef} style={{ display: 'none' }} />
+      </fieldset>
+
+      {/* RECENT RESULT SECTION */}
+      {lastDetectionResult && (
+        <fieldset style={{ marginBottom: '20px', padding: '15px' }}>
+          <legend><strong>Latest AI Analysis Result (Groq qwen/qwen3.6-27b)</strong></legend>
+          <p><strong>Time:</strong> {lastDetectionResult.time}</p>
+          <p>
+            <strong>Monkey Detected? </strong> 
+            <span style={{ fontSize: '18px', fontWeight: 'bold', color: lastDetectionResult.isMonkey ? 'red' : 'green' }}>
+              {lastDetectionResult.isMonkey ? 'YES 🐒' : 'NO ❌'}
+            </span>
+          </p>
+          <p><strong>Final Classification Answer:</strong> <code>{lastDetectionResult.clean}</code></p>
+          <p><strong>Full Raw Response (including thinking tags):</strong></p>
+          <pre style={{ backgroundColor: '#f5f5f5', padding: '10px', overflowX: 'auto', fontSize: '12px' }}>
+            {lastDetectionResult.raw}
+          </pre>
+        </fieldset>
+      )}
+
+      {/* HISTORY LOG TABLE */}
+      <fieldset style={{ padding: '15px' }}>
+        <legend><strong>Detection Logs & Snapshot History ({logs.length})</strong></legend>
+        {logs.length === 0 ? (
+          <p>No snapshots captured yet.</p>
+        ) : (
+          <table border="1" cellPadding="8" cellSpacing="0" style={{ width: '100%', borderCollapse: 'collapse', marginTop: '10px' }}>
+            <thead>
+              <tr style={{ backgroundColor: '#f0f0f0' }}>
+                <th>Time</th>
+                <th>Snapshot Preview</th>
+                <th>Monkey Present?</th>
+                <th>Parsed Answer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {logs.map(log => (
+                <tr key={log.id}>
+                  <td>{log.time}</td>
+                  <td style={{ textAlign: 'center' }}>
+                    <img src={log.image} alt="Captured snapshot" style={{ width: '100px', height: '75px', border: '1px solid #ccc' }} />
+                  </td>
+                  <td style={{ fontWeight: 'bold', color: log.isMonkey ? 'red' : 'green' }}>
+                    {log.isMonkey ? 'YES 🐒' : 'NO ❌'}
+                  </td>
+                  <td><code>{log.cleanResponse}</code></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </fieldset>
+    </div>
+  );
+}
