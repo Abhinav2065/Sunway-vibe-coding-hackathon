@@ -1,98 +1,232 @@
+import { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, FlatList, SafeAreaView, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Image } from 'expo-image';
-import { Platform, StyleSheet } from 'react-native';
+import * as Notifications from 'expo-notifications';
 
-import { HelloWave } from '@/components/hello-wave';
-import ParallaxScrollView from '@/components/parallax-scroll-view';
-import { ThemedText } from '@/components/themed-text';
-import { ThemedView } from '@/components/themed-view';
-import { Link } from 'expo-router';
+const MONKEY_API = 'http://localhost:8080';
+const IMAGE_API = 'http://localhost:8081';
 
-export default function HomeScreen() {
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+  }),
+});
+
+type MonkeyStatus = {
+  isMonkey: boolean;
+};
+
+type MonkeyImage = {
+  id: string;
+  url: string;
+};
+
+export default function MonkeyDetectionScreen() {
+  const [isMonkey, setIsMonkey] = useState(false);
+  const [images, setImages] = useState<MonkeyImage[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [notificationEnabled, setNotificationEnabled] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  const requestNotificationPermission = useCallback(async () => {
+    const { status } = await Notifications.requestPermissionsAsync();
+    setNotificationEnabled(status === 'granted');
+  }, []);
+
+  const sendMonkeyNotification = useCallback(async () => {
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: 'Monkey Detected',
+        body: 'A monkey has been detected near your phone!',
+        sound: true,
+      },
+      trigger: null,
+    });
+  }, []);
+
+  const fetchMonkeyStatus = useCallback(async () => {
+    try {
+      const response = await fetch(`${MONKEY_API}/`);
+      if (!response.ok) return;
+
+      const data: MonkeyStatus = await response.json();
+      const monkeyDetected = data.isMonkey === true;
+
+      setIsMonkey(monkeyDetected);
+
+      if (monkeyDetected) {
+        await fetchMonkeyImages();
+        if (notificationEnabled) {
+          await sendMonkeyNotification();
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch monkey status:', error);
+    }
+  }, [notificationEnabled, sendMonkeyNotification]);
+
+  const fetchMonkeyImages = useCallback(async () => {
+    if (!isMonkey) return;
+
+    try {
+      setLoading(true);
+      const response = await fetch(`${IMAGE_API}/monkeys`);
+      if (!response.ok) return;
+
+      const data: MonkeyImage[] = await response.json();
+      setImages(data);
+    } catch (error) {
+      console.error('Failed to fetch monkey images:', error);
+    } finally {
+      setLoading(false);
+    }
+  }, [isMonkey]);
+
+  useEffect(() => {
+    requestNotificationPermission();
+    fetchMonkeyStatus();
+    const interval = setInterval(fetchMonkeyStatus, 5000);
+    return () => clearInterval(interval);
+  }, [requestNotificationPermission, fetchMonkeyStatus]);
+
+  const renderMonkeyImage = ({ item }: { item: MonkeyImage }) => (
+    <Image
+      source={{ uri: item.url }}
+      style={styles.monkeyImage}
+      contentFit="cover"
+      transition={200}
+    />
+  );
+
   return (
-    <ParallaxScrollView
-      headerBackgroundColor={{ light: '#A1CEDC', dark: '#1D3D47' }}
-      headerImage={
-        <Image
-          source={require('@/assets/images/partial-react-logo.png')}
-          style={styles.reactLogo}
-        />
-      }>
-      <ThemedView style={styles.titleContainer}>
-        <ThemedText type="title">Welcome!</ThemedText>
-        <HelloWave />
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 1: Try it</ThemedText>
-        <ThemedText>
-          Edit <ThemedText type="defaultSemiBold">app/(tabs)/index.tsx</ThemedText> to see changes.
-          Press{' '}
-          <ThemedText type="defaultSemiBold">
-            {Platform.select({
-              ios: 'cmd + d',
-              android: 'cmd + m',
-              web: 'F12',
-            })}
-          </ThemedText>{' '}
-          to open developer tools.
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <Link href="/modal">
-          <Link.Trigger>
-            <ThemedText type="subtitle">Step 2: Explore</ThemedText>
-          </Link.Trigger>
-          <Link.Preview />
-          <Link.Menu>
-            <Link.MenuAction title="Action" icon="cube" onPress={() => alert('Action pressed')} />
-            <Link.MenuAction
-              title="Share"
-              icon="square.and.arrow.up"
-              onPress={() => alert('Share pressed')}
-            />
-            <Link.Menu title="More" icon="ellipsis">
-              <Link.MenuAction
-                title="Delete"
-                icon="trash"
-                destructive
-                onPress={() => alert('Delete pressed')}
-              />
-            </Link.Menu>
-          </Link.Menu>
-        </Link>
+    <SafeAreaView style={styles.container}>
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        <Text style={styles.header}>Monkey Detection</Text>
 
-        <ThemedText>
-          {`Tap the Explore tab to learn more about what's included in this starter app.`}
-        </ThemedText>
-      </ThemedView>
-      <ThemedView style={styles.stepContainer}>
-        <ThemedText type="subtitle">Step 3: Get a fresh start</ThemedText>
-        <ThemedText>
-          {`When you're ready, run `}
-          <ThemedText type="defaultSemiBold">npm run reset-project</ThemedText> to get a fresh{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> directory. This will move the current{' '}
-          <ThemedText type="defaultSemiBold">app</ThemedText> to{' '}
-          <ThemedText type="defaultSemiBold">app-example</ThemedText>.
-        </ThemedText>
-      </ThemedView>
-    </ParallaxScrollView>
+        <View style={styles.statusContainer}>
+          <View style={[styles.statusIndicator, isMonkey ? styles.statusActive : styles.statusInactive]} />
+          <Text style={styles.statusText}>
+            {isMonkey ? 'Monkey Detected!' : 'No Monkey Detected'}
+          </Text>
+        </View>
+
+        {!isMonkey && (
+          <View style={styles.refreshContainer}>
+            <ActivityIndicator size="large" color="#007AFF" />
+            <Text style={styles.refreshText}>Refreshing...</Text>
+          </View>
+        )}
+
+        {isMonkey && (
+          <View style={styles.imagesContainer}>
+            <Text style={styles.imagesHeader}>Detected Images</Text>
+            {loading ? (
+              <ActivityIndicator size="large" color="#007AFF" style={styles.loader} />
+            ) : (
+              <FlatList
+                data={images}
+                renderItem={renderMonkeyImage}
+                keyExtractor={(item) => item.id}
+                numColumns={2}
+                scrollEnabled={false}
+                columnWrapperStyle={styles.row}
+                ListEmptyComponent={
+                  <Text style={styles.emptyText}>No monkey images available</Text>
+                }
+              />
+            )}
+          </View>
+        )}
+      </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  titleContainer: {
+  container: {
+    flex: 1,
+    backgroundColor: '#f5f5f5',
+  },
+  scrollContent: {
+    padding: 16,
+    alignItems: 'center',
+  },
+  header: {
+    fontSize: 28,
+    fontWeight: 'bold',
+    marginVertical: 20,
+    color: '#1c1c1e',
+  },
+  statusContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    padding: 16,
+    borderRadius: 12,
+    backgroundColor: '#ffffff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
+    elevation: 3,
+    marginBottom: 20,
+    width: '100%',
   },
-  stepContainer: {
-    gap: 8,
-    marginBottom: 8,
+  statusIndicator: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    marginRight: 12,
   },
-  reactLogo: {
-    height: 178,
-    width: 290,
-    bottom: 0,
-    left: 0,
-    position: 'absolute',
+  statusActive: {
+    backgroundColor: '#34C759',
+  },
+  statusInactive: {
+    backgroundColor: '#8E8E93',
+  },
+  statusText: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: '#1c1c1e',
+  },
+  refreshContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginTop: 40,
+  },
+  refreshText: {
+    marginTop: 12,
+    fontSize: 16,
+    color: '#8E8E93',
+  },
+  imagesContainer: {
+    width: '100%',
+    marginTop: 16,
+  },
+  imagesHeader: {
+    fontSize: 20,
+    fontWeight: '600',
+    marginBottom: 12,
+    color: '#1c1c1e',
+  },
+  row: {
+    justifyContent: 'space-between',
+  },
+  monkeyImage: {
+    width: '48%',
+    height: 150,
+    borderRadius: 8,
+    marginBottom: 12,
+    backgroundColor: '#e5e5e5',
+  },
+  loader: {
+    marginVertical: 20,
+  },
+  emptyText: {
+    textAlign: 'center',
+    color: '#8E8E93',
+    marginVertical: 20,
   },
 });
